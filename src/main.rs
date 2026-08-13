@@ -9,7 +9,6 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use serde::Serialize;
-use unicode_segmentation::UnicodeSegmentation;
 use walkdir::WalkDir;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -483,7 +482,7 @@ fn is_emoji_modifier(cp: u32) -> bool {
 ///   - U+200D (ZWJ) after emoji base characters (for emoji sequences)
 ///   - Skin tone modifiers after emoji base characters
 ///   - Variation selectors after emoji base characters
-fn is_benign(cp: u32, line_idx: usize, pos: usize, prev_cp: Option<u32>, prev_flagged: bool) -> bool {
+fn is_benign(cp: u32, line_idx: usize, pos: usize, prev_cp: Option<u32>, _prev_flagged: bool) -> bool {
     // UTF-8 BOM at file start
     if cp == 0xFEFF && line_idx == 0 && pos == 0 {
         return true;
