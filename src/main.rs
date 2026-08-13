@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use serde::Serialize;
+use unicode_segmentation::UnicodeSegmentation;
 use walkdir::WalkDir;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -354,23 +355,160 @@ fn is_ai_harness_ext(path: &Path) -> bool {
     false
 }
 
+/// Returns true if a codepoint is in the emoji base character ranges.
+/// Covers common emoji blocks in Unicode.
+fn is_emoji_base(cp: u32) -> bool {
+    matches!(cp,
+        // Emoticons
+        0x1F600..=0x1F64F |
+        // Miscellaneous Symbols and Pictographs
+        0x1F300..=0x1F5FF |
+        // Transport and Map Symbols
+        0x1F680..=0x1F6FF |
+        // Supplemental Symbols and Pictographs
+        0x1F900..=0x1F9FF |
+        // Symbols and Pictographs Extended-A
+        0x1FA70..=0x1FAFF |
+        // Miscellaneous Symbols
+        0x2600..=0x26FF |
+        // Dingbats
+        0x2700..=0x27BF |
+        // Enclosed Alphanumeric Supplement (some emoji)
+        0x1F100..=0x1F1FF |
+        // Enclosed Ideographic Supplement
+        0x1F200..=0x1F2FF |
+        // Regional Indicator Symbols (flags)
+        0x1F1E6..=0x1F1FF |
+        // Mahjong Tiles, Domino Tiles
+        0x1F000..=0x1F02F |
+        // Playing Cards
+        0x1F0A0..=0x1F0FF |
+        // Additional commonly used emoji symbols
+        0x231A..=0x231B |  // Watch, Hourglass
+        0x2328 |           // Keyboard
+        0x23CF |           // Eject
+        0x23E9..=0x23F3 |  // Media controls
+        0x23F8..=0x23FA |  // Media controls
+        0x24C2 |           // Circled M
+        0x25AA..=0x25AB |  // Squares
+        0x25B6 |           // Play button
+        0x25C0 |           // Reverse button
+        0x25FB..=0x25FE |  // Squares
+        0x2600..=0x2604 |  // Weather
+        0x260E |           // Telephone
+        0x2611 |           // Ballot box with check
+        0x2614..=0x2615 |  // Umbrella, Hot beverage
+        0x2618 |           // Shamrock
+        0x261D |           // Pointing finger
+        0x2620 |           // Skull and crossbones
+        0x2622..=0x2623 |  // Radioactive, Biohazard
+        0x2626 |           // Orthodox cross
+        0x262A |           // Star and crescent
+        0x262E..=0x262F |  // Peace, Yin yang
+        0x2638..=0x263A |  // Wheel of dharma, Smiley
+        0x2640 |           // Female sign
+        0x2642 |           // Male sign
+        0x2648..=0x2653 |  // Zodiac signs
+        0x265F..=0x2660 |  // Chess pieces
+        0x2663 |           // Club suit
+        0x2665..=0x2666 |  // Heart, Diamond suits
+        0x2668 |           // Hot springs
+        0x267B |           // Recycling
+        0x267E..=0x267F |  // Infinity, Wheelchair
+        0x2692..=0x2697 |  // Hammer, Alembic
+        0x2699 |           // Gear
+        0x269B..=0x269C |  // Atom, Fleur-de-lis
+        0x26A0..=0x26A1 |  // Warning, High voltage
+        0x26A7 |           // Transgender symbol
+        0x26AA..=0x26AB |  // Circles
+        0x26B0..=0x26B1 |  // Coffin, Funeral urn
+        0x26BD..=0x26BE |  // Soccer, Baseball
+        0x26C4..=0x26C5 |  // Snowman, Sun
+        0x26C8 |           // Thunder cloud and rain
+        0x26CE |           // Ophiuchus
+        0x26CF |           // Pick
+        0x26D1 |           // Helmet
+        0x26D3..=0x26D4 |  // Chains, No entry
+        0x26E9..=0x26EA |  // Shinto shrine, Church
+        0x26F0..=0x26F5 |  // Mountain, Sailboat
+        0x26F7..=0x26FA |  // Skier, Tent
+        0x26FD |           // Fuel pump
+        0x2702 |           // Scissors
+        0x2705 |           // Check mark
+        0x2708..=0x2709 |  // Airplane, Envelope
+        0x270A..=0x270B |  // Fist, Raised hand
+        0x270C..=0x270D |  // Victory, Writing hand
+        0x270F |           // Pencil
+        0x2712 |           // Nib
+        0x2714 |           // Check mark
+        0x2716 |           // X mark
+        0x271D |           // Latin cross
+        0x2721 |           // Star of David
+        0x2728 |           // Sparkles
+        0x2733..=0x2734 |  // Eight-spoked asterisk
+        0x2744 |           // Snowflake
+        0x2747 |           // Sparkle
+        0x274C |           // Cross mark
+        0x274E |           // Cross mark button
+        0x2753..=0x2755 |  // Question marks
+        0x2757 |           // Exclamation mark
+        0x2763..=0x2764 |  // Heart exclamation, Heavy heart
+        0x2795..=0x2797 |  // Plus, Minus, Division
+        0x27A1 |           // Right arrow
+        0x27B0 |           // Curly loop
+        0x27BF |           // Double curly loop
+        0x2934..=0x2935 |  // Arrows
+        0x2B05..=0x2B07 |  // Arrows
+        0x2B1B..=0x2B1C |  // Squares
+        0x2B50 |           // Star
+        0x2B55 |           // Circle
+        0x3030 |           // Wavy dash
+        0x303D |           // Part alternation mark
+        0x3297 |           // Circled ideograph congratulation
+        0x3299             // Circled ideograph secret
+    )
+}
+
+/// Returns true if a codepoint is an emoji modifier (skin tone, etc.)
+fn is_emoji_modifier(cp: u32) -> bool {
+    matches!(cp,
+        0x1F3FB..=0x1F3FF  // Emoji skin tone modifiers (Type-1 through Type-6)
+    )
+}
+
 /// Returns true if a flagged codepoint should be treated as benign in this
-/// position. Currently covers:
+/// position. Now includes comprehensive emoji context detection:
 ///   - U+FEFF as the very first character of the file (UTF-8 BOM)
-///   - U+FE0F (VS-16) directly after a non-ASCII, non-flagged codepoint
-///     (emoji presentation selector on an emoji base)
+///   - U+FE0F (VS-16) after emoji base characters
+///   - U+200D (ZWJ) after emoji base characters (for emoji sequences)
+///   - Skin tone modifiers after emoji base characters
+///   - Variation selectors after emoji base characters
 fn is_benign(cp: u32, line_idx: usize, pos: usize, prev_cp: Option<u32>, prev_flagged: bool) -> bool {
+    // UTF-8 BOM at file start
     if cp == 0xFEFF && line_idx == 0 && pos == 0 {
         return true;
     }
-    if cp == 0xFE0F {
-        if let Some(p) = prev_cp {
-            if p > 0x7F && !prev_flagged {
-                return true;
-            }
-        }
+
+    // Check if previous character exists and is an emoji base
+    let prev_is_emoji = prev_cp.map_or(false, is_emoji_base);
+
+    match cp {
+        // Variation Selector-16 (emoji presentation) after emoji base
+        0xFE0F => prev_is_emoji,
+
+        // Zero-Width Joiner in emoji sequences (e.g., family, professions)
+        // Only benign when following an emoji base
+        0x200D => prev_is_emoji,
+
+        // Emoji skin tone modifiers after emoji base
+        0x1F3FB..=0x1F3FF => prev_is_emoji,
+
+        // Other variation selectors (VS-1 through VS-15) after emoji
+        // These are less common but can appear with some emoji
+        0xFE00..=0xFE0E => prev_is_emoji,
+
+        _ => false,
     }
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -748,15 +886,15 @@ EXIT CODES
   2   Usage / configuration error.
 
 EXAMPLES
-  aid --target ./myrepo
-  aid --target src/main.py --output - --format text
-  aid --target . --threshold high --format json --output /tmp/aid.json
-  git diff --name-only HEAD | xargs -I{} aid --target {} --output - --threshold info
-  aid --target ./src --include-cc --include-zs --workers 8
-  aid --list-chars";
+  poltergeist --target ./myrepo
+  poltergeist --target src/main.py --output - --format text
+  poltergeist --target . --threshold high --format json --output /tmp/report.json
+  git diff --name-only HEAD | xargs -I{} poltergeist --target {} --output - --threshold info
+  poltergeist --target ./src --include-cc --include-zs --workers 8
+  poltergeist --list-chars";
 
 const LIST_CHARS_TEXT: &str = "\
-aid detects the following invisible/format Unicode character classes by default.
+poltergeist detects the following invisible/format Unicode character classes by default.
 
 DEFAULT DETECTION
   Zero-width & joiners
@@ -825,9 +963,9 @@ impl std::fmt::Display for OutputFormat {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "aid",
+    name = "poltergeist",
     version = VERSION,
-    about = "aid — ASCII/Unicode Invisible-character Detection\n\
+    about = "poltergeist — ASCII/Unicode Invisible-character Detection\n\
              Scans files for invisible Unicode characters used in prompt injection,\n\
              BiDi spoofing, ASCII smuggling, and hidden-payload attacks.",
     after_help = EPILOG,
@@ -938,7 +1076,7 @@ fn main() -> Result<()> {
             OutputFormat::Text => "txt",
         };
         let p = cli.output.clone()
-            .unwrap_or_else(|| format!("aid-report-{}.{ext}", utc_timestamp()));
+            .unwrap_or_else(|| format!("poltergeist-report-{}.{ext}", utc_timestamp()));
         Some(PathBuf::from(p))
     };
 
