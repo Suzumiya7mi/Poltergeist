@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use serde::Serialize;
+use unicode_segmentation::UnicodeSegmentation;
 use walkdir::WalkDir;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -354,159 +355,132 @@ fn is_ai_harness_ext(path: &Path) -> bool {
     false
 }
 
-/// Returns true if a codepoint is in the emoji base character ranges.
-/// Covers common emoji blocks in Unicode.
-fn is_emoji_base(cp: u32) -> bool {
-    matches!(cp,
-        // Emoticons
-        0x1F600..=0x1F64F |
-        // Miscellaneous Symbols and Pictographs
-        0x1F300..=0x1F5FF |
-        // Transport and Map Symbols
-        0x1F680..=0x1F6FF |
-        // Supplemental Symbols and Pictographs
-        0x1F900..=0x1F9FF |
-        // Symbols and Pictographs Extended-A
-        0x1FA70..=0x1FAFF |
-        // Miscellaneous Symbols
-        0x2600..=0x26FF |
-        // Dingbats
-        0x2700..=0x27BF |
-        // Enclosed Alphanumeric Supplement (some emoji)
-        0x1F100..=0x1F1FF |
-        // Enclosed Ideographic Supplement
-        0x1F200..=0x1F2FF |
-        // Regional Indicator Symbols (flags)
-        0x1F1E6..=0x1F1FF |
-        // Mahjong Tiles, Domino Tiles
-        0x1F000..=0x1F02F |
-        // Playing Cards
-        0x1F0A0..=0x1F0FF |
-        // Additional commonly used emoji symbols
-        0x231A..=0x231B |  // Watch, Hourglass
-        0x2328 |           // Keyboard
-        0x23CF |           // Eject
-        0x23E9..=0x23F3 |  // Media controls
-        0x23F8..=0x23FA |  // Media controls
-        0x24C2 |           // Circled M
-        0x25AA..=0x25AB |  // Squares
-        0x25B6 |           // Play button
-        0x25C0 |           // Reverse button
-        0x25FB..=0x25FE |  // Squares
-        0x2600..=0x2604 |  // Weather
-        0x260E |           // Telephone
-        0x2611 |           // Ballot box with check
-        0x2614..=0x2615 |  // Umbrella, Hot beverage
-        0x2618 |           // Shamrock
-        0x261D |           // Pointing finger
-        0x2620 |           // Skull and crossbones
-        0x2622..=0x2623 |  // Radioactive, Biohazard
-        0x2626 |           // Orthodox cross
-        0x262A |           // Star and crescent
-        0x262E..=0x262F |  // Peace, Yin yang
-        0x2638..=0x263A |  // Wheel of dharma, Smiley
-        0x2640 |           // Female sign
-        0x2642 |           // Male sign
-        0x2648..=0x2653 |  // Zodiac signs
-        0x265F..=0x2660 |  // Chess pieces
-        0x2663 |           // Club suit
-        0x2665..=0x2666 |  // Heart, Diamond suits
-        0x2668 |           // Hot springs
-        0x267B |           // Recycling
-        0x267E..=0x267F |  // Infinity, Wheelchair
-        0x2692..=0x2697 |  // Hammer, Alembic
-        0x2699 |           // Gear
-        0x269B..=0x269C |  // Atom, Fleur-de-lis
-        0x26A0..=0x26A1 |  // Warning, High voltage
-        0x26A7 |           // Transgender symbol
-        0x26AA..=0x26AB |  // Circles
-        0x26B0..=0x26B1 |  // Coffin, Funeral urn
-        0x26BD..=0x26BE |  // Soccer, Baseball
-        0x26C4..=0x26C5 |  // Snowman, Sun
-        0x26C8 |           // Thunder cloud and rain
-        0x26CE |           // Ophiuchus
-        0x26CF |           // Pick
-        0x26D1 |           // Helmet
-        0x26D3..=0x26D4 |  // Chains, No entry
-        0x26E9..=0x26EA |  // Shinto shrine, Church
-        0x26F0..=0x26F5 |  // Mountain, Sailboat
-        0x26F7..=0x26FA |  // Skier, Tent
-        0x26FD |           // Fuel pump
-        0x2702 |           // Scissors
-        0x2705 |           // Check mark
-        0x2708..=0x2709 |  // Airplane, Envelope
-        0x270A..=0x270B |  // Fist, Raised hand
-        0x270C..=0x270D |  // Victory, Writing hand
-        0x270F |           // Pencil
-        0x2712 |           // Nib
-        0x2714 |           // Check mark
-        0x2716 |           // X mark
-        0x271D |           // Latin cross
-        0x2721 |           // Star of David
-        0x2728 |           // Sparkles
-        0x2733..=0x2734 |  // Eight-spoked asterisk
-        0x2744 |           // Snowflake
-        0x2747 |           // Sparkle
-        0x274C |           // Cross mark
-        0x274E |           // Cross mark button
-        0x2753..=0x2755 |  // Question marks
-        0x2757 |           // Exclamation mark
-        0x2763..=0x2764 |  // Heart exclamation, Heavy heart
-        0x2795..=0x2797 |  // Plus, Minus, Division
-        0x27A1 |           // Right arrow
-        0x27B0 |           // Curly loop
-        0x27BF |           // Double curly loop
-        0x2934..=0x2935 |  // Arrows
-        0x2B05..=0x2B07 |  // Arrows
-        0x2B1B..=0x2B1C |  // Squares
-        0x2B50 |           // Star
-        0x2B55 |           // Circle
-        0x3030 |           // Wavy dash
-        0x303D |           // Part alternation mark
-        0x3297 |           // Circled ideograph congratulation
-        0x3299             // Circled ideograph secret
-    )
+// ---------------------------------------------------------------------------
+// Emoji context detection
+// ---------------------------------------------------------------------------
+//
+// Invisible characters are only excusable when they are *structurally* part of
+// a well-formed emoji sequence. Rather than carrying a hand-written table of
+// emoji ranges — which goes stale with every Unicode release and always misses
+// the legacy pictographs (©, ®, ™, ‼, ℹ, ↔ …) — we let `unicode-segmentation`
+// decide. It already ships the UCD tables and applies UAX #29, so a character
+// is excused only when the segmenter agrees it belongs to the emoji cluster it
+// sits in.
+
+/// Zero-width joiner.
+const ZWJ: char = '\u{200D}';
+
+/// Sentinel pictograph used to probe the segmenter (GRINNING FACE).
+const PROBE_PICTO: char = '\u{1F600}';
+
+/// Combining enclosing keycap — terminates a keycap sequence.
+const KEYCAP: char = '\u{20E3}';
+
+/// The only tag sequences Unicode defines for real text: the RGI subdivision
+/// flags for England, Scotland and Wales. They are fixed-length and carry no
+/// attacker-controlled data, so they are the sole tag sequences we excuse.
+const RGI_SUBDIVISION_FLAGS: &[&str] = &[
+    "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}", // gbeng
+    "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}", // gbsct
+    "\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}", // gbwls
+];
+
+/// Returns true if `ch` carries the Unicode `Extended_Pictographic` property,
+/// answered by `unicode-segmentation`'s own tables instead of a local range
+/// list.
+///
+/// The probe leans on grapheme break rule GB11:
+///
+/// ```text
+/// \p{Extended_Pictographic} Extend* ZWJ  ×  \p{Extended_Pictographic}
+/// ```
+///
+/// `ch + ZWJ + 😀` therefore collapses into a single grapheme cluster if and
+/// only if `ch` is Extended_Pictographic; any other character breaks before
+/// the sentinel and yields two clusters.
+fn is_extended_pictographic(ch: char) -> bool {
+    let mut probe = String::with_capacity(ch.len_utf8() + ZWJ.len_utf8() + PROBE_PICTO.len_utf8());
+    probe.push(ch);
+    probe.push(ZWJ);
+    probe.push(PROBE_PICTO);
+    probe.graphemes(true).count() == 1
 }
 
-/// Returns true if a codepoint is an emoji modifier (skin tone, etc.)
-fn is_emoji_modifier(cp: u32) -> bool {
-    matches!(cp,
-        0x1F3FB..=0x1F3FF  // Emoji skin tone modifiers (Type-1 through Type-6)
-    )
+/// Characters that may legitimately carry a presentation selector: any
+/// pictograph, plus the keycap bases `0-9`, `#` and `*`.
+fn is_presentation_base(ch: char) -> bool {
+    matches!(ch, '0'..='9' | '#' | '*') || is_extended_pictographic(ch)
 }
 
-/// Returns true if a flagged codepoint should be treated as benign in this
-/// position. Now includes comprehensive emoji context detection:
+/// What kind of grapheme cluster we are looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClusterKind {
+    /// Not an emoji sequence — nothing inside it is excused.
+    Plain,
+    /// A well-formed emoji sequence: pictographic base or keycap.
+    Emoji,
+    /// One of the three RGI subdivision flags, tag characters included.
+    SubdivisionFlag,
+}
+
+/// Classify one grapheme cluster. The cluster boundaries themselves come from
+/// `unicode-segmentation`, so a character only reaches `Emoji` here if the
+/// segmenter already bound it to a pictographic base.
+fn classify_cluster(cluster: &str) -> ClusterKind {
+    if RGI_SUBDIVISION_FLAGS.contains(&cluster) {
+        return ClusterKind::SubdivisionFlag;
+    }
+    let Some(first) = cluster.chars().next() else {
+        return ClusterKind::Plain;
+    };
+    // Keycap sequences (1️⃣) start from an ASCII base, which is not
+    // pictographic, so they need their own structural check.
+    if matches!(first, '0'..='9' | '#' | '*') && cluster.ends_with(KEYCAP) {
+        return ClusterKind::Emoji;
+    }
+    if is_extended_pictographic(first) {
+        return ClusterKind::Emoji;
+    }
+    ClusterKind::Plain
+}
+
+/// Returns true if a flagged character should be treated as benign in this
+/// position:
 ///   - U+FEFF as the very first character of the file (UTF-8 BOM)
-///   - U+FE0F (VS-16) after emoji base characters
-///   - U+200D (ZWJ) after emoji base characters (for emoji sequences)
-///   - Skin tone modifiers after emoji base characters
-///   - Variation selectors after emoji base characters
-fn is_benign(cp: u32, line_idx: usize, pos: usize, prev_cp: Option<u32>, _prev_flagged: bool) -> bool {
+///   - a presentation selector (VS-15/VS-16) directly after the character
+///     whose presentation it selects
+///   - a ZWJ that actually joins something inside an emoji cluster
+///   - the tag characters of an RGI subdivision flag
+///
+/// Everything else stays reported. In particular, unicode tags (U+E0000–
+/// U+E007F) and the variation selector supplement (U+E0100–U+E01EF) are never
+/// excused by emoji context — they are the smuggling channels this tool exists
+/// to find.
+fn is_benign(
+    ch: char,
+    line_idx: usize,
+    pos: usize,
+    kind: ClusterKind,
+    prev_in_cluster: Option<char>,
+    is_last_in_cluster: bool,
+) -> bool {
     // UTF-8 BOM at file start
-    if cp == 0xFEFF && line_idx == 0 && pos == 0 {
+    if ch == '\u{FEFF}' && line_idx == 0 && pos == 0 {
         return true;
     }
 
-    // Check if previous character exists and is an emoji base
-    let prev_is_emoji = prev_cp.map_or(false, is_emoji_base);
-
-    match cp {
-        // Variation Selector-16 (emoji presentation) after emoji base
-        0xFE0F => prev_is_emoji,
-
-        // Zero-Width Joiner in emoji sequences (e.g., family, professions)
-        // Only benign when following an emoji base
-        0x200D => prev_is_emoji,
-
-        // Emoji skin tone modifiers after emoji base
-        0x1F3FB..=0x1F3FF => prev_is_emoji,
-
-        // Other variation selectors (VS-1 through VS-15) after emoji
-        // These are less common but can appear with some emoji
-        0xFE00..=0xFE0E => prev_is_emoji,
-
-        _ => false,
+    match kind {
+        ClusterKind::Plain => false,
+        ClusterKind::SubdivisionFlag => true,
+        ClusterKind::Emoji => match ch {
+            // A presentation selector is meaningful exactly once, immediately
+            // after its base. A run of them is not an emoji sequence, it is a
+            // payload.
+            '\u{FE0E}' | '\u{FE0F}' => prev_in_cluster.is_some_and(is_presentation_base),
+            // A ZWJ joins two pictographs; a trailing ZWJ joins nothing.
+            ZWJ => !is_last_in_cluster,
+            _ => false,
+        },
     }
 }
 
@@ -540,6 +514,38 @@ fn group_consecutive(mut findings: Vec<CharFinding>) -> Vec<Vec<CharFinding>> {
     groups
 }
 
+/// Scan one line, walking it grapheme cluster by grapheme cluster so that each
+/// flagged character is judged against the cluster the segmenter put it in.
+/// `position` stays a character index into the line.
+fn scan_line(line: &str, line_idx: usize, opts: &ScanOptions) -> Vec<CharFinding> {
+    let mut out: Vec<CharFinding> = Vec::new();
+    let mut pos = 0usize;
+
+    for cluster in line.graphemes(true) {
+        // Computed lazily: most clusters hold nothing worth flagging, and
+        // classification costs a probe through the segmenter.
+        let mut kind: Option<ClusterKind> = None;
+        let mut prev_in_cluster: Option<char> = None;
+        let mut chars = cluster.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if let Some((name, char_type, decoded)) = classify_cp(ch as u32, opts) {
+                let skip = !opts.strict && {
+                    let k = *kind.get_or_insert_with(|| classify_cluster(cluster));
+                    is_benign(ch, line_idx, pos, k, prev_in_cluster, chars.peek().is_none())
+                };
+                if !skip {
+                    out.push(CharFinding { ch, name, char_type, position: pos, decoded });
+                }
+            }
+            prev_in_cluster = Some(ch);
+            pos += 1;
+        }
+    }
+
+    out
+}
+
 fn scan_file(path: &Path, base: &Path, opts: &ScanOptions) -> Option<FileResult> {
     let bytes = fs::read(path).ok()?;
     let content = String::from_utf8_lossy(&bytes);
@@ -557,23 +563,7 @@ fn scan_file(path: &Path, base: &Path, opts: &ScanOptions) -> Option<FileResult>
     let mut findings: Vec<LineFinding> = Vec::new();
 
     for (idx, line) in content.lines().enumerate() {
-        let mut line_findings: Vec<CharFinding> = Vec::new();
-        let mut prev_cp: Option<u32> = None;
-        let mut prev_was_flagged = false;
-        for (pos, ch) in line.chars().enumerate() {
-            let cp = ch as u32;
-            let classified = classify_cp(cp, opts);
-            let mut flagged = false;
-            if let Some((name, char_type, decoded)) = classified {
-                let skip = !opts.strict && is_benign(cp, idx, pos, prev_cp, prev_was_flagged);
-                if !skip {
-                    line_findings.push(CharFinding { ch, name, char_type, position: pos, decoded });
-                    flagged = true;
-                }
-            }
-            prev_cp = Some(cp);
-            prev_was_flagged = flagged;
-        }
+        let line_findings = scan_line(line, idx, opts);
         if !line_findings.is_empty() {
             findings.push(LineFinding {
                 line_num: idx + 1,
@@ -1011,7 +1001,7 @@ struct Cli {
     include_confusable_spaces: bool,
 
     /// Report all occurrences, disabling benign-context skips
-    /// (file-leading BOM, VS-16 after emoji base characters)
+    /// (file-leading BOM, emoji sequence components)
     #[arg(long)]
     strict: bool,
 
@@ -1259,5 +1249,164 @@ fn level_cap(s: &str) -> String {
     match c.next() {
         None => String::new(),
         Some(f) => f.to_uppercase().to_string() + c.as_str(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(strict: bool) -> ScanOptions {
+        ScanOptions {
+            include_cc: false,
+            include_zs: false,
+            include_confusable_spaces: false,
+            strict,
+        }
+    }
+
+    /// Characters reported for a line, as codepoints.
+    fn flagged(line: &str) -> Vec<u32> {
+        scan_line(line, 0, &opts(false)).iter().map(|f| f.ch as u32).collect()
+    }
+
+    fn flagged_strict(line: &str) -> Vec<u32> {
+        scan_line(line, 0, &opts(true)).iter().map(|f| f.ch as u32).collect()
+    }
+
+    #[test]
+    fn extended_pictographic_probe_matches_ucd() {
+        // Modern emoji
+        assert!(is_extended_pictographic('\u{1F600}')); // 😀
+        assert!(is_extended_pictographic('\u{1F3F4}')); // 🏴
+        // Legacy pictographs a hand-written range table typically misses
+        assert!(is_extended_pictographic('\u{00A9}')); // ©
+        assert!(is_extended_pictographic('\u{00AE}')); // ®
+        assert!(is_extended_pictographic('\u{2122}')); // ™
+        assert!(is_extended_pictographic('\u{203C}')); // ‼
+        assert!(is_extended_pictographic('\u{2139}')); // ℹ
+        assert!(is_extended_pictographic('\u{2194}')); // ↔
+        assert!(is_extended_pictographic('\u{21A9}')); // ↩
+        // Non-pictographic
+        assert!(!is_extended_pictographic('a'));
+        assert!(!is_extended_pictographic('1'));
+        assert!(!is_extended_pictographic('\u{4E00}')); // 一
+        assert!(!is_extended_pictographic('\u{FE0F}')); // VS-16 itself
+    }
+
+    #[test]
+    fn legacy_pictograph_with_presentation_selector_is_clean() {
+        assert!(flagged("\u{00A9}\u{FE0F}").is_empty(), "©️");
+        assert!(flagged("\u{2122}\u{FE0F}").is_empty(), "™️");
+        assert!(flagged("\u{2139}\u{FE0F}").is_empty(), "ℹ️");
+    }
+
+    #[test]
+    fn zwj_sequences_are_clean() {
+        assert!(flagged("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}").is_empty(), "family");
+        // ZWJ following a skin tone modifier — the old prev-char check missed this
+        assert!(flagged("\u{1F468}\u{1F3FB}\u{200D}\u{1F4BB}").is_empty(), "technologist");
+        assert!(flagged("\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}").is_empty(), "rainbow flag");
+        assert!(
+            flagged("\u{1F575}\u{1F3FB}\u{200D}\u{2640}\u{FE0F}").is_empty(),
+            "woman detective"
+        );
+    }
+
+    #[test]
+    fn keycap_sequence_is_clean() {
+        assert!(flagged("1\u{FE0F}\u{20E3}").is_empty(), "1️⃣");
+        assert!(flagged("#\u{FE0F}\u{20E3}").is_empty(), "#️⃣");
+    }
+
+    #[test]
+    fn rgi_subdivision_flags_are_clean() {
+        let england = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+        assert!(flagged(england).is_empty());
+    }
+
+    #[test]
+    fn tag_payload_behind_a_flag_is_still_reported() {
+        // 🏴 followed by tag characters spelling "hi" — not an RGI flag
+        let smuggled = "\u{1F3F4}\u{E0068}\u{E0069}\u{E007F}";
+        assert_eq!(flagged(smuggled), vec![0xE0068, 0xE0069, 0xE007F]);
+    }
+
+    #[test]
+    fn variation_selector_runs_are_reported() {
+        // Only the first VS-16 belongs to the emoji; the rest are a payload.
+        assert_eq!(
+            flagged("\u{1F600}\u{FE0F}\u{FE0F}\u{FE0F}"),
+            vec![0xFE0F, 0xFE0F]
+        );
+        // Variation selector supplement is never excused by emoji context.
+        assert_eq!(flagged("\u{1F600}\u{E0100}"), vec![0xE0100]);
+    }
+
+    #[test]
+    fn selector_without_a_pictographic_base_is_reported() {
+        assert_eq!(flagged("a\u{FE0F}"), vec![0xFE0F]);
+        assert_eq!(flagged("\u{4E00}\u{FE0F}"), vec![0xFE0F]);
+        // VS-1..VS-14 are not emoji presentation selectors
+        assert_eq!(flagged("\u{1F600}\u{FE00}"), vec![0xFE00]);
+    }
+
+    #[test]
+    fn dangling_zwj_is_reported() {
+        assert_eq!(flagged("\u{1F600}\u{200D}"), vec![0x200D]);
+        assert_eq!(flagged("\u{200D}"), vec![0x200D]);
+        assert_eq!(flagged("a\u{200D}b"), vec![0x200D]);
+    }
+
+    #[test]
+    fn plain_invisibles_are_reported() {
+        assert_eq!(flagged("hi\u{200B}there"), vec![0x200B]);
+        assert_eq!(flagged("\u{202E}txet"), vec![0x202E]);
+        // Adjacent to an emoji, but the segmenter keeps them in their own cluster
+        assert_eq!(flagged("\u{1F600}\u{200B}"), vec![0x200B]);
+    }
+
+    #[test]
+    fn bom_is_benign_only_at_file_start() {
+        assert!(scan_line("\u{FEFF}hello", 0, &opts(false)).is_empty());
+        assert_eq!(
+            scan_line("hello\u{FEFF}", 0, &opts(false))
+                .iter()
+                .map(|f| f.ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0xFEFF]
+        );
+        assert_eq!(
+            scan_line("\u{FEFF}hello", 3, &opts(false))
+                .iter()
+                .map(|f| f.ch as u32)
+                .collect::<Vec<_>>(),
+            vec![0xFEFF]
+        );
+    }
+
+    #[test]
+    fn strict_mode_reports_everything() {
+        assert_eq!(flagged_strict("\u{00A9}\u{FE0F}"), vec![0xFE0F]);
+        assert_eq!(flagged_strict("\u{FEFF}hi"), vec![0xFEFF]);
+        assert_eq!(
+            flagged_strict("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            vec![0x200D, 0x200D]
+        );
+    }
+
+    #[test]
+    fn positions_are_character_indices() {
+        let f = scan_line("ab\u{200B}cd", 0, &opts(false));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].position, 2);
+        // Position must keep counting across multi-char emoji clusters
+        let f = scan_line("\u{1F468}\u{200D}\u{1F469}x\u{200B}", 0, &opts(false));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].position, 4);
     }
 }

@@ -23,7 +23,8 @@ Poltergeist detects these threats by scanning for 100+ classes of invisible Unic
 - **Fast Parallel Scanning**: Multi-threaded processing with configurable worker counts
 - **Multiple Output Formats**: CSV, JSON, or human-readable text
 - **Unicode Tag Decoding**: Extracts and displays hidden ASCII payloads from tag characters
-- **Smart Filtering**: Skips benign contexts (UTF-8 BOM, emoji variation selectors) unless in strict mode
+- **Smart Filtering**: Skips benign contexts (UTF-8 BOM, emoji sequence components) unless in strict mode
+- **Grapheme-Aware**: Emoji are recognized via Unicode grapheme segmentation (UAX #29), not a hand-maintained emoji list
 
 ## Installation
 
@@ -214,21 +215,52 @@ Typical performance: ~2000 files/second (single-threaded) on modern hardware.
 
 1. **Walk directory tree**: Collect files matching AI-harness extensions (or all text files with `--all-files`)
 2. **Binary detection**: Skip files with known binary extensions or null bytes
-3. **Character classification**: Parse each line, classify codepoints via lookup table + range checks
-4. **Grouping**: Consecutive invisible characters are grouped into runs
-5. **Suspicion scoring**: Calculate based on total count, unique characters, and longest run
-6. **Unicode tag decoding**: Extract ASCII payloads from tag character sequences
-7. **Report generation**: Output CSV/JSON/text with per-file findings
+3. **Grapheme segmentation**: Split each line into grapheme clusters (UAX #29) so emoji sequences are judged as a unit
+4. **Character classification**: Classify codepoints via lookup table + range checks, excusing only valid emoji components
+5. **Grouping**: Consecutive invisible characters are grouped into runs
+6. **Suspicion scoring**: Calculate based on total count, unique characters, and longest run
+7. **Unicode tag decoding**: Extract ASCII payloads from tag character sequences
+8. **Report generation**: Output CSV/JSON/text with per-file findings
 
 ## False Positives
 
 Poltergeist minimizes false positives by:
 
 - **Skipping benign BOMs**: UTF-8 BOM (U+FEFF) at file start is ignored by default
-- **Emoji tolerance**: Variation Selector 16 (U+FE0F) after emoji bases is allowed
+- **Emoji tolerance**: invisible characters that are structurally part of a valid emoji sequence are allowed
 - **Strict mode**: Use `--strict` to disable these skips for forensic analysis
 
 Always manually inspect flagged files to verify intent and context.
+
+### How emoji are recognized
+
+Emoji are not matched against a list of codepoint ranges. Each line is split
+into grapheme clusters with [`unicode-segmentation`](https://crates.io/crates/unicode-segmentation)
+(UAX #29), and a character is excused only when the segmenter itself has bound
+it to a pictographic base. The `Extended_Pictographic` property is read out of
+the crate's UCD tables by probing grapheme break rule GB11
+(`\p{Extended_Pictographic} Extend* ZWJ × \p{Extended_Pictographic}`), so
+support tracks the crate's Unicode version instead of a table that goes stale.
+
+This fixes false positives a range list misses — legacy pictographs such as
+`©️`, `®️`, `™️`, `‼️`, `ℹ️`, `↔️`, `↩️`; keycaps such as `1️⃣`; and ZWJ sequences
+where the joiner follows a skin-tone modifier (`👨🏻‍💻`) rather than the base
+emoji.
+
+Emoji context excuses only what a valid sequence actually needs, and only where
+it needs it:
+
+| Situation | Result |
+|-----------|--------|
+| `😀` + one VS-16, `©️`, `1️⃣` | benign |
+| ZWJ that joins two pictographs (`👨‍👩‍👧`, `👨🏻‍💻`) | benign |
+| The three RGI subdivision flags (`🏴󠁧󠁢󠁥󠁮󠁧󠁿`, `🏴󠁧󠁢󠁳󠁣󠁴󠁿`, `🏴󠁧󠁢󠁷󠁬󠁳󠁿`) | benign — fixed sequences, zero payload capacity |
+| A **run** of variation selectors after an emoji | reported (only the first is meaningful) |
+| VS-1 … VS-14 after an emoji | reported (not presentation selectors) |
+| Variation Selector Supplement (U+E0100–U+E01EF) | always reported |
+| Any other tag sequence behind `🏴` | always reported — this is the smuggling channel |
+| Trailing ZWJ that joins nothing (`😀‍`) | reported |
+| VS-16 after a non-pictographic base (`a︎`) | reported |
 
 ## Contributing
 
